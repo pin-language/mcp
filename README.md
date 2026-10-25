@@ -55,7 +55,7 @@ claude mcp add squares /full/path/to/squares-mcp     # Claude Code
 Ids are sent back exactly as they came (numbers or strings). Tested with the official MCP Python SDK
 (initialize, tools/list, tools/call, errors, ping).
 
-Not yet: resources, prompts, the HTTP transport, sending notifications to the client. Needs Pin 0.8 or later
+Not yet: resources, prompts, the HTTP transport, sending notifications to the client. Needs Pin 0.8.0 or later
 (`read_line`, `json_raw`).
 
 MIT licence, © PinaTo Co., Ltd.
