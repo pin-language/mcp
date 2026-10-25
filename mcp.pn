@@ -1,0 +1,138 @@
+// pin-mcp: write a Model Context Protocol (MCP) server in Pin, spoken over standard input/output
+// (one JSON-RPC 2.0 message per line), the way Claude Code, Claude Desktop and other MCP clients start
+// local servers. Your program owns the loop:
+//
+//     while (true) {
+//         $r = try mcp::next() catch ($e) { break; };          // the client closed stdin: done
+//         if (mcp::basic($r, "my-server", "1.0.0")) { continue; } // initialize, ping, notifications
+//         ...answer $r->method == "tools/list" / "tools/call" with mcp::reply_*()
+//     }
+
+class Prop {
+    public function __construct(public string $type, public string $description) {}
+}
+
+class Schema {
+    public string $type = "object";
+    public map<string, Prop> $properties = [];
+    public list<string> $required = [];
+}
+
+// A tool the client may call. Describe its parameters with param().
+export class Tool {
+    public string $name;
+    public string $description;
+    public Schema $inputSchema;
+
+    function __construct(string $name, string $description) {
+        $this->name = $name;
+        $this->description = $description;
+        $this->inputSchema = new Schema();
+    }
+
+    // $type is a JSON Schema type: "string", "integer", "number", "boolean", "array" or "object"
+    function param(string $name, string $type, string $description, bool $required): void {
+        $this->inputSchema->properties[$name] = new Prop($type, $description);
+        if ($required) { $this->inputSchema->required[] = $name; }
+    }
+}
+
+// One message from the client.
+export class Request {
+    public string $method;
+    public string $id;          // the JSON text of its id ("" for a notification): sent back as it came
+    public string $params;      // the JSON text of its params ("" when there are none)
+
+    function __construct(string $line) {
+        $this->method = json_string($line, "method");
+        $this->id = json_raw($line, "id");
+        $this->params = json_raw($line, "params");
+    }
+
+    function isNotification(): bool { return $this->id == ""; }
+}
+
+// The next message; fails (code 1) when the client has closed the connection.
+export function next(): Request throws {
+    while (true) {
+        $line = try read_line();
+        if (strlen(trim($line)) > 0) { return new Request($line); }
+    }
+}
+
+// The tool a tools/call asks for, and its arguments as JSON text: read them with json_string / json_int /
+// json_float / json_bool / json_raw, e.g. json_int(mcp::arguments($r), "n").
+export function tool_name(Request $r): string { return json_string($r->params, "name"); }
+export function arguments(Request $r): string { return json_raw($r->params, "arguments"); }
+
+function send(Request $r, string $result_json): void {
+    if ($r->isNotification()) { return; }
+    echo "{\"jsonrpc\":\"2.0\",\"id\":", $r->id, ",\"result\":", $result_json, "}\n";
+}
+
+class Empty {}
+class Caps { public Empty $tools; function __construct() { $this->tools = new Empty(); } }
+class Info { public function __construct(public string $name, public string $version) {} }
+class InitResult {
+    public string $protocolVersion;
+    public Caps $capabilities;
+    public Info $serverInfo;
+    function __construct(string $version, string $name, string $server_version) {
+        $this->protocolVersion = $version;
+        $this->capabilities = new Caps();
+        $this->serverInfo = new Info($name, $server_version);
+    }
+}
+
+// Answers what every server answers the same way: initialize, ping and notifications. true = done with $r.
+export function basic(Request $r, string $name, string $version): bool {
+    if ($r->method == "initialize") {
+        $asked = json_string($r->params, "protocolVersion");
+        send($r, json_encode(new InitResult(strlen($asked) > 0 ? $asked : "2025-06-18", $name, $version)));
+        return true;
+    }
+    if ($r->method == "ping") {
+        send($r, "{}");
+        return true;
+    }
+    if ($r->isNotification()) { return true; }      // notifications/initialized and friends: nothing to answer
+    return false;
+}
+
+class ToolList { public list<Tool> $tools = []; }
+
+// The answer to tools/list.
+export function reply_tools(Request $r, list<Tool> $tools): void {
+    $l = new ToolList();
+    $l->tools = copy($tools);
+    send($r, json_encode($l));
+}
+
+class Text { public function __construct(public string $type, public string $text) {} }
+class CallResult {
+    public list<Text> $content = [];
+    public bool $isError = false;
+}
+
+// The answer to tools/call: the tool's output as text (often json_encode of something).
+export function reply_text(Request $r, string $text): void {
+    $c = new CallResult();
+    $c->content[] = new Text("text", $text);
+    send($r, json_encode($c));
+}
+
+// The tool ran but failed (bad arguments, nothing found): the model sees the text and can try again.
+export function reply_tool_error(Request $r, string $text): void {
+    $c = new CallResult();
+    $c->content[] = new Text("text", $text);
+    $c->isError = true;
+    send($r, json_encode($c));
+}
+
+class RpcError { public function __construct(public int $code, public string $message) {} }
+
+// A protocol error: -32601 unknown method, -32602 invalid params.
+export function reply_error(Request $r, int $code, string $message): void {
+    if ($r->isNotification()) { return; }
+    echo "{\"jsonrpc\":\"2.0\",\"id\":", $r->id, ",\"error\":", json_encode(new RpcError($code, $message)), "}\n";
+}
